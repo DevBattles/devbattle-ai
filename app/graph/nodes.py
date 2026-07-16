@@ -50,17 +50,23 @@ Provide a detailed evaluation of:
 4. performance (up to {performance_max} points)
 5. code_quality (up to {code_quality_max} points)
 
+GRADING RULES:
+- If the files are empty, blank, or have no real code content matching the assignment, all scores must be exactly 0.
+- If the student's code does not implement the core functional requirements or expected output logic described in the metadata/rubric, the correctness score must be 0 or extremely low. Do not give any default/pity points.
+- If there is unescaped double quotes or syntax errors in the student's solution, penalize the code_quality and correctness score heavily.
+- For all feedback strings, ensure that any double quotes inside text values are properly escaped (e.g., use \\\" or single quotes instead) to keep the JSON payload valid.
+
 Format response as JSON:
 {{
-  "correctness": {{ "score": 25, "feedback": "..." }},
-  "responsiveness": {{ "score": 15, "feedback": "..." }},
-  "accessibility": {{ "score": 12, "feedback": "..." }},
-  "performance": {{ "score": 14, "feedback": "..." }},
-  "code_quality": {{ "score": 18, "feedback": "..." }},
-  "strengths": ["Detail 1"],
-  "weaknesses": ["Detail 2"],
-  "improvements": ["Detail 3"],
-  "feedback": "General feedback summary"
+  "correctness": {{ "score": 0, "feedback": "Detailed explanation of why correctness requirements were met or failed" }},
+  "responsiveness": {{ "score": 0, "feedback": "Detailed design layout feedback" }},
+  "accessibility": {{ "score": 0, "feedback": "Accessibility / Semantic HTML assessment" }},
+  "performance": {{ "score": 0, "feedback": "Performance & optimization feedback" }},
+  "code_quality": {{ "score": 0, "feedback": "Code architecture evaluation" }},
+  "strengths": ["Strength detail 1"],
+  "weaknesses": ["Failure detail 1"],
+  "improvements": ["Suggested improvement 1"],
+  "feedback": "Overall summary feedback"
 }}
 Return only valid JSON.
 """
@@ -245,7 +251,23 @@ async def gemini_evaluate_node(state: SubmissionState) -> dict:
         if clean_str.endswith("```"):
             clean_str = clean_str[:-3]
 
-        parsed = json.loads(clean_str.strip())
+        clean_str = clean_str.strip()
+        try:
+            parsed = json.loads(clean_str)
+        except json.JSONDecodeError as jde:
+            # Try to extract content inside the outermost { } braces
+            start_idx = clean_str.find('{')
+            end_idx = clean_str.rfind('}')
+            if start_idx != -1 and end_idx != -1:
+                try:
+                    parsed = json.loads(clean_str[start_idx:end_idx+1])
+                except Exception:
+                    logger.error(f"Fallback brace parsing failed: {jde}. Raw report was: {raw_report}")
+                    raise jde
+            else:
+                logger.error(f"JSON brace boundaries not found: {jde}. Raw report was: {raw_report}")
+                raise jde
+
         return {"code_evaluation": parsed}
     except Exception as e:
         logger.error(f"Code evaluation failed: {e}")
