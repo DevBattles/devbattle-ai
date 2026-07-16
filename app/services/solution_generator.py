@@ -2,6 +2,8 @@ from app.providers.gemini import GeminiProvider
 from app.embeddings.vector_client import VectorClient
 from app.prompts.solution_prompts import SOLUTION_GENERATOR_PROMPT
 from app.utils.logger import logger
+from sqlalchemy import text
+import uuid
 import json
 
 class SolutionGeneratorService:
@@ -67,6 +69,27 @@ class SolutionGeneratorService:
 
         if solutions_to_save:
             await self.vector_client.save_solutions(question_id, version, solutions_to_save)
+
+        # Synchronize generated rubric configuration directly with the question_versions table in Supabase
+        try:
+            async with self.vector_client.async_session() as session:
+                async with session.begin():
+                    await session.execute(
+                        text("""
+                            UPDATE question_versions 
+                            SET rubric = :rubric 
+                            WHERE question_id = :qid AND version = :ver
+                        """),
+                        {
+                            "rubric": json.dumps(rubric),
+                            "qid": uuid.UUID(question_id),
+                            "ver": version
+                        }
+                    )
+                    await session.commit()
+            logger.info(f"Synchronized rubric to question_versions table for {question_id} v{version}")
+        except Exception as db_err:
+            logger.warning(f"Could not persist rubric to database question_versions record: {db_err}")
 
         return {
             "questionId": question_id,
