@@ -73,20 +73,19 @@ class SolutionGeneratorService:
         # Synchronize generated rubric configuration directly with the question_versions table in Supabase
         try:
             async with self.vector_client.async_session() as session:
-                async with session.begin():
-                    await session.execute(
-                        text("""
-                            UPDATE question_versions 
-                            SET rubric = :rubric 
-                            WHERE question_id = :qid AND version = :ver
-                        """),
-                        {
-                            "rubric": json.dumps(rubric),
-                            "qid": uuid.UUID(question_id),
-                            "ver": version
-                        }
-                    )
-                    await session.commit()
+                await session.execute(
+                    text("""
+                        UPDATE question_versions 
+                        SET rubric = :rubric 
+                        WHERE question_id = :qid AND version = :ver
+                    """),
+                    {
+                        "rubric": json.dumps(rubric),
+                        "qid": uuid.UUID(question_id),
+                        "ver": version
+                    }
+                )
+                await session.commit()
             logger.info(f"Synchronized rubric to question_versions table for {question_id} v{version}")
         except Exception as db_err:
             logger.warning(f"Could not persist rubric to database question_versions record: {db_err}")

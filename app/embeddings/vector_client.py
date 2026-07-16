@@ -9,7 +9,18 @@ import uuid
 class VectorClient:
     def __init__(self):
         logger.info("Initializing pgvector database client...")
-        self.engine = create_async_engine(settings.async_database_url, echo=False)
+        self.engine = create_async_engine(
+            settings.async_database_url,
+            echo=False,
+            pool_pre_ping=True,
+            pool_size=10,
+            max_overflow=20,
+            pool_recycle=1800,
+            connect_args={
+                "prepared_statement_cache_size": 0,
+                "command_timeout": 30
+            }
+        )
         self.async_session = async_sessionmaker(self.engine, expire_on_commit=False, class_=AsyncSession)
 
     async def initialize_db(self):
@@ -41,7 +52,6 @@ class VectorClient:
                         embedding=sol["embedding"]
                     )
                     session.add(record)
-                await session.commit()
         logger.info(f"Saved {len(solutions)} solution embeddings for question {question_id} v{version}")
 
     async def get_similar_solutions(self, question_id: str, query_embedding: List[float], limit: int = 5) -> List[Dict[str, Any]]:
