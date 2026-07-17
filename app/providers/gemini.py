@@ -6,12 +6,14 @@ from app.providers.base import BaseAIProvider
 from app.config.config import settings
 from app.utils.logger import logger
 from typing import List, Optional
+from app.services.model_router import generate_content_with_router
 
 class GeminiProvider(BaseAIProvider):
     def __init__(self):
         logger.info("Initializing Google GenAI client...")
         self.client = genai.Client(api_key=settings.gemini_api_key)
         self._text_model = "models/gemini-2.5-flash"
+        self._chat_model = "models/gemini-2.5-pro"
         self._embed_model = "models/gemini-embedding-001"
         self._initialized = False
         self._lock = asyncio.Lock()
@@ -37,41 +39,47 @@ class GeminiProvider(BaseAIProvider):
                         self._text_model = opt
                         break
 
+                # Detect Chat / Strongest Reasoning model
+                self._chat_model = "models/gemini-2.5-pro"
+                for opt in ["models/gemini-2.5-pro", "models/gemini-2.0-pro-exp-02-05", "models/gemini-1.5-pro", "models/gemini-2.5-flash"]:
+                    if opt in supported or opt.replace("models/", "") in supported:
+                        self._chat_model = opt
+                        break
+
                 # Detect Embedding model
                 for opt in ["models/gemini-embedding-001", "models/text-embedding-004", "models/gemini-embedding-2"]:
                     if opt in supported or opt.replace("models/", "") in supported:
                         self._embed_model = opt
                         break
 
-                logger.info(f"Auto-detected models: text/vision/json = {self._text_model}, embedding = {self._embed_model}")
+                # Override from env variables if configured
+                text_model_env = os.environ.get("TEXT_MODEL")
+                if text_model_env:
+                    self._text_model = text_model_env
+                chat_model_env = os.environ.get("CHAT_MODEL")
+                if chat_model_env:
+                    self._chat_model = chat_model_env
+
+                logger.info(f"Auto-detected models: text = {self._text_model}, chat = {self._chat_model}, embedding = {self._embed_model}")
                 self._initialized = True
             except Exception as e:
                 logger.error(f"Error detecting supported models: {e}. Falling back to defaults.")
                 self._initialized = True # prevent endless retries
 
-    async def generate_text(self, prompt: str, system_instruction: Optional[str] = None, json_mode: bool = False) -> str:
+    async def generate_text(self, prompt: str, system_instruction: Optional[str] = None, json_mode: bool = False, model: Optional[str] = None) -> str:
         await self._detect_models()
-        logger.debug(f"Calling GenAI generate_text on model: {self._text_model}, json_mode: {json_mode}")
-
-        config = types.GenerateContentConfig(
+        return await generate_content_with_router(
+            client=self.client,
+            prompt=prompt,
             system_instruction=system_instruction,
-            response_mime_type="application/json" if json_mode else None
+            json_mode=json_mode,
+            model=model
         )
 
-        loop = asyncio.get_running_loop()
-        response = await loop.run_in_executor(
-            None,
-            lambda: self.client.models.generate_content(
-                model=self._text_model,
-                contents=prompt,
-                config=config
-            )
-        )
-        return response.text
-
-    async def generate_multimodal(self, prompt: str, image_bytes: bytes, mime_type: str = "image/png") -> str:
+    async def generate_multimodal(self, prompt: str, image_bytes: bytes, mime_type: str = "image/png", model: Optional[str] = None) -> str:
         await self._detect_models()
-        logger.debug(f"Calling GenAI generate_multimodal on model: {self._text_model}")
+        target_model = model or self._text_model
+        logger.debug(f"Calling GenAI generate_multimodal on model: {target_model}")
 
         image_part = types.Part.from_bytes(
             data=image_bytes,
@@ -82,11 +90,11 @@ class GeminiProvider(BaseAIProvider):
         response = await loop.run_in_executor(
             None,
             lambda: self.client.models.generate_content(
-                model=self._text_model,
+                model=target_model,
                 contents=[prompt, image_part]
             )
         )
-        return response.text
+        return response.text or ""
 
     async def get_embedding(self, text: str) -> List[float]:
         await self._detect_models()

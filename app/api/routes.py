@@ -14,6 +14,12 @@ from typing import Dict, Any
 
 router = APIRouter()
 
+@router.post("/internal/router/reset")
+def reset_router_health():
+    from app.services.model_router import reset_health_registry
+    reset_health_registry()
+    return {"status": "reset"}
+
 # Singletons shared from LangGraph nodes module context
 from app.graph.nodes import provider, vector_client
 
@@ -22,7 +28,12 @@ mentor_service = MentorService(provider)
 
 @router.get("/health")
 def health_check():
-    return {"status": "ok", "service": "devbattle-ai-backend"}
+    from app.services.model_router import get_health_status_report
+    return {
+        "status": "ok",
+        "service": "devbattle-ai-backend",
+        "health_details": get_health_status_report()
+    }
 
 @router.post("/internal/questions/generate")
 async def generate_solutions(payload: GenerateQuestionRequest):
@@ -79,6 +90,8 @@ async def mentor_chat(payload: MentorChatRequest):
         logger.info("Received AI Mentor chat request")
         response = await mentor_service.get_mentor_response(payload.model_dump())
         return {"success": True, "message": "Mentor query responded", "data": {"response": response}}
+    except HTTPException as he:
+        raise he
     except Exception as e:
         logger.error(f"Mentor chat endpoint error: {e}")
         raise HTTPException(status_code=500, detail=str(e))

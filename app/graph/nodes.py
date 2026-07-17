@@ -28,8 +28,12 @@ Return only valid JSON.
 """
 
 CODE_EVALUATE_PROMPT = """
-You are a Principal AI backend grading assistant. Evaluate the following student submission:
+You are a Principal AI backend grading assistant.
+Evaluate the following student submission:
 Files: {student_files}
+
+Question Category: {category}
+Evaluation Strategy: {evaluation_strategy}
 
 Compare it against:
 1. Question metadata:
@@ -43,29 +47,35 @@ Requirements: {requirements}
 3. Similar reference solutions:
 {similar_solutions}
 
-Provide a detailed evaluation of:
-1. correctness (up to {correctness_max} points)
-2. responsiveness (up to {responsiveness_max} points)
-3. accessibility (up to {accessibility_max} points)
-4. performance (up to {performance_max} points)
-5. code_quality (up to {code_quality_max} points)
+You MUST follow the specific evaluation strategy for the "{category}" category:
+- For JavaScript/Python/C++: Evaluate code correctness, logic accuracy, execution output correctness, edge cases, and time/space complexity.
+- For SQL: Evaluate the query structure, join correctness, filtering constraints, and expected output dataset.
+- For React/HTML/CSS: Evaluate the component structure, DOM layout semantics, visual layout, responsive styles, and browser rendering.
+- For Theory: Perform a semantic comparison of the student's explanation/text against the expected answer, utilizing the rubric. Do not execute any code.
+- For MCQ: Simply compare the selected choice directly.
 
-GRADING RULES:
-- If the files are empty, blank, or have no real code content matching the assignment, all scores must be exactly 0.
-- If the student's code does not implement the core functional requirements or expected output logic described in the metadata/rubric, the correctness score must be 0 or extremely low. Do not give any default/pity points.
-- If there is unescaped double quotes or syntax errors in the student's solution, penalize the code_quality and correctness score heavily.
-- For all feedback strings, ensure that any double quotes inside text values are properly escaped (e.g., use \\\" or single quotes instead) to keep the JSON payload valid.
+SCORING CRITERIA:
+1. correctness: up to 40 points.
+2. edge_cases: up to 20 points.
+3. requirements: up to 20 points.
+4. code_quality: up to 10 points.
+5. performance: up to 10 points.
+Total Max Score: 100 points.
+
+STRICT SCORING RULES:
+- If the submission is empty, blank, copy-pasted starter files, or completely incorrect, the score MUST be in the 0-20% range. NEVER fabricate high scores.
+- Be extremely rigorous. If code fails to meet requirements, penalize heavily.
 
 Format response as JSON:
 {{
-  "correctness": {{ "score": 0, "feedback": "Detailed explanation of why correctness requirements were met or failed" }},
-  "responsiveness": {{ "score": 0, "feedback": "Detailed design layout feedback" }},
-  "accessibility": {{ "score": 0, "feedback": "Accessibility / Semantic HTML assessment" }},
-  "performance": {{ "score": 0, "feedback": "Performance & optimization feedback" }},
-  "code_quality": {{ "score": 0, "feedback": "Code architecture evaluation" }},
-  "strengths": ["Strength detail 1"],
-  "weaknesses": ["Failure detail 1"],
-  "improvements": ["Suggested improvement 1"],
+  "correctness": {{ "score": 0, "feedback": "assessment explanation" }},
+  "edge_cases": {{ "score": 0, "feedback": "assessment explanation" }},
+  "requirements": {{ "score": 0, "feedback": "assessment explanation" }},
+  "code_quality": {{ "score": 0, "feedback": "assessment explanation" }},
+  "performance": {{ "score": 0, "feedback": "assessment explanation" }},
+  "strengths": ["Detail 1"],
+  "weaknesses": ["Detail 2"],
+  "improvements": ["Detail 3"],
   "feedback": "Overall summary feedback"
 }}
 Return only valid JSON.
@@ -96,7 +106,9 @@ async def retrieve_question_node(state: SubmissionState) -> dict:
         async with vector_client.async_session() as session:
             result = await session.execute(
                 text("""
-                    SELECT title, description, starter_files, expected_output 
+                    SELECT title, description, starter_files, expected_output,
+                           category, workspace_type, evaluation_strategy, supported_language,
+                           preview_required, execution_mode, options
                     FROM question_versions 
                     WHERE question_id = :qid AND version = :ver
                 """),
@@ -107,7 +119,13 @@ async def retrieve_question_node(state: SubmissionState) -> dict:
             if not row:
                 # Fallback to question_bank main record if version entry not found
                 fallback_result = await session.execute(
-                    text("SELECT title, description, expected_output FROM question_bank WHERE id = :qid"),
+                    text("""
+                        SELECT title, description, expected_output,
+                               category, workspace_type, evaluation_strategy, supported_language,
+                               preview_required, execution_mode, options
+                        FROM question_bank 
+                        WHERE id = :qid
+                    """),
                     {"qid": uuid.UUID(qid)}
                 )
                 fb_row = fallback_result.fetchone()
@@ -118,14 +136,28 @@ async def retrieve_question_node(state: SubmissionState) -> dict:
                     "title": fb_row[0],
                     "description": fb_row[1],
                     "starter_files": {},
-                    "expected_output": fb_row[2] or ""
+                    "expected_output": fb_row[2] or "",
+                    "category": fb_row[3],
+                    "workspace_type": fb_row[4],
+                    "evaluation_strategy": fb_row[5],
+                    "supported_language": fb_row[6],
+                    "preview_required": fb_row[7] if fb_row[7] is not None else False,
+                    "execution_mode": fb_row[8],
+                    "options": fb_row[9] if fb_row[9] else None
                 }
             else:
                 meta = {
                     "title": row[0],
                     "description": row[1],
                     "starter_files": row[2] or {},
-                    "expected_output": row[3] or ""
+                    "expected_output": row[3] or "",
+                    "category": row[4],
+                    "workspace_type": row[5],
+                    "evaluation_strategy": row[6],
+                    "supported_language": row[7],
+                    "preview_required": row[8] if row[8] is not None else False,
+                    "execution_mode": row[9],
+                    "options": row[10] if row[10] else None
                 }
             
             return {"question_meta": meta}
@@ -183,6 +215,9 @@ async def vision_check_node(state: SubmissionState) -> dict:
     logger.info("Executing vision_check node...")
     files = state["student_files"]
     meta = state.get("question_meta", {})
+    if not meta.get("preview_required"):
+        logger.info("Bypassing vision check node.")
+        return {"visual_evaluation": None}
     expected_output = meta.get("expected_output", "A responsive webpage matching instructions.")
 
     try:
@@ -218,24 +253,15 @@ async def gemini_evaluate_node(state: SubmissionState) -> dict:
     solutions = state.get("similar_solutions", [])
 
     # Format checklists parameters
-    correctness_max = rubric.get("correctness", {}).get("max_points", 30)
-    responsiveness_max = rubric.get("responsiveness", {}).get("max_points", 20)
-    accessibility_max = rubric.get("accessibility", {}).get("max_points", 15)
-    performance_max = rubric.get("performance", {}).get("max_points", 15)
-    code_quality_max = rubric.get("code_quality", {}).get("max_points", 20)
-
     prompt = CODE_EVALUATE_PROMPT.format(
         student_files=json.dumps(files),
+        category=meta.get("category", "General"),
+        evaluation_strategy=meta.get("evaluation_strategy", "ui_playwright"),
         title=meta.get("title", ""),
         description=meta.get("description", ""),
         requirements=meta.get("requirements", ""),
         rubric=json.dumps(rubric),
-        similar_solutions=json.dumps(solutions),
-        correctness_max=correctness_max,
-        responsiveness_max=responsiveness_max,
-        accessibility_max=accessibility_max,
-        performance_max=performance_max,
-        code_quality_max=code_quality_max
+        similar_solutions=json.dumps(solutions)
     )
 
     try:
@@ -284,20 +310,23 @@ async def aggregate_scores_node(state: SubmissionState) -> dict:
     # Extract score keys
     try:
         corr_score = float(code_eval.get("correctness", {}).get("score", 0))
-        resp_score = float(code_eval.get("responsiveness", {}).get("score", 0))
-        acc_score = float(code_eval.get("accessibility", {}).get("score", 0))
-        perf_score = float(code_eval.get("performance", {}).get("score", 0))
+        edge_score = float(code_eval.get("edge_cases", {}).get("score", 0))
+        req_score = float(code_eval.get("requirements", {}).get("score", 0))
         qual_score = float(code_eval.get("code_quality", {}).get("score", 0))
+        perf_score = float(code_eval.get("performance", {}).get("score", 0))
         
-        raw_code_score = corr_score + resp_score + acc_score + perf_score + qual_score
+        raw_code_score = corr_score + edge_score + req_score + qual_score + perf_score
     except Exception as e:
         logger.error(f"Error reading subscores: {e}")
         raw_code_score = 70
 
-    visual_score = float(visual_eval.get("visual_score", 80) if visual_eval else 80)
+    if visual_eval:
+        visual_score = float(visual_eval.get("visual_score", 100))
+        aggregated = (raw_code_score * 0.8) + (visual_score * 0.2)
+    else:
+        visual_score = 0.0
+        aggregated = raw_code_score
 
-    # 80% code score + 20% visual vision layout rendering score
-    aggregated = (raw_code_score * 0.8) + (visual_score * 0.2)
     final_score = int(round(aggregated))
 
     # Apply grading standard
@@ -325,10 +354,10 @@ async def aggregate_scores_node(state: SubmissionState) -> dict:
 
     rubric_scores = {
         "correctness": corr_score,
-        "responsiveness": resp_score,
-        "accessibility": acc_score,
-        "performance": perf_score,
+        "edge_cases": edge_score,
+        "requirements": req_score,
         "code_quality": qual_score,
+        "performance": perf_score,
         "visual_comparison": visual_score
     }
 

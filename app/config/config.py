@@ -7,6 +7,11 @@ class Settings(BaseSettings):
     supabase_url: str = Field(..., validation_alias="SUPABASE_URL")
     supabase_service_role_key: str = Field(..., validation_alias="SUPABASE_SERVICE_ROLE_KEY")
     playwright_headless: bool = Field(True, validation_alias="PLAYWRIGHT_HEADLESS")
+    gemini_models_fallback_chain: str = Field(
+        "models/gemini-2.5-pro,models/gemini-2.5-flash,models/gemini-2.0-flash,models/gemini-1.5-pro",
+        validation_alias="GEMINI_MODELS_FALLBACK_CHAIN"
+    )
+    model_cooldown_seconds: int = Field(60, validation_alias="MODEL_COOLDOWN_SECONDS")
 
     model_config = SettingsConfigDict(
         env_file=".env",

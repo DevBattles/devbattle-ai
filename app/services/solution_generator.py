@@ -54,6 +54,14 @@ class SolutionGeneratorService:
 
         generated_solutions = parsed.get("solutions", [])
         rubric = parsed.get("rubric", {})
+        category = parsed.get("category")
+        workspace_type = parsed.get("workspaceType")
+        evaluation_strategy = parsed.get("evaluationStrategy")
+        supported_language = parsed.get("supportedLanguage")
+        preview_required = parsed.get("previewRequired", False)
+        execution_mode = parsed.get("executionMode")
+        options = parsed.get("options")
+        starter_files = parsed.get("starterFiles", {})
 
         solutions_to_save = []
         for sol in generated_solutions:
@@ -70,29 +78,54 @@ class SolutionGeneratorService:
         if solutions_to_save:
             await self.vector_client.save_solutions(question_id, version, solutions_to_save)
 
-        # Synchronize generated rubric configuration directly with the question_versions table in Supabase
+        # Synchronize generated rubric and metadata configuration directly with the question_versions table in Supabase
         try:
             async with self.vector_client.async_session() as session:
                 await session.execute(
                     text("""
                         UPDATE question_versions 
-                        SET rubric = :rubric 
+                        SET rubric = :rubric,
+                            category = :category,
+                            workspace_type = :workspace_type,
+                            evaluation_strategy = :evaluation_strategy,
+                            supported_language = :supported_language,
+                            preview_required = :preview_required,
+                            execution_mode = :execution_mode,
+                            options = :options,
+                            starter_files = :starter_files
                         WHERE question_id = :qid AND version = :ver
                     """),
                     {
                         "rubric": json.dumps(rubric),
+                        "category": category,
+                        "workspace_type": workspace_type,
+                        "evaluation_strategy": evaluation_strategy,
+                        "supported_language": supported_language,
+                        "preview_required": preview_required,
+                        "execution_mode": execution_mode,
+                        "options": json.dumps(options) if options is not None else None,
+                        "starter_files": json.dumps(starter_files),
                         "qid": uuid.UUID(question_id),
                         "ver": version
                     }
                 )
                 await session.commit()
-            logger.info(f"Synchronized rubric to question_versions table for {question_id} v{version}")
+            logger.info(f"Synchronized rubric and metadata to question_versions table for {question_id} v{version}")
         except Exception as db_err:
-            logger.warning(f"Could not persist rubric to database question_versions record: {db_err}")
+            logger.warning(f"Could not persist rubric and metadata to database question_versions record: {db_err}")
 
         return {
             "questionId": question_id,
             "version": version,
             "solutions_count": len(solutions_to_save),
-            "rubric": rubric
+            "rubric": rubric,
+            "category": category,
+            "workspaceType": workspace_type,
+            "evaluationStrategy": evaluation_strategy,
+            "supportedLanguage": supported_language,
+            "previewRequired": preview_required,
+            "executionMode": execution_mode,
+            "options": options,
+            "starterFiles": starter_files,
+            "solutions": solutions_to_save
         }
