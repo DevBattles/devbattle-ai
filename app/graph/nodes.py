@@ -55,24 +55,17 @@ You MUST follow the specific evaluation strategy for the "{category}" category:
 - For MCQ: Simply compare the selected choice directly.
 
 SCORING CRITERIA:
-1. correctness: up to 40 points.
-2. edge_cases: up to 20 points.
-3. requirements: up to 20 points.
-4. code_quality: up to 10 points.
-5. performance: up to 10 points.
-Total Max Score: 100 points.
+Evaluate the code holistically based on correctness, edge cases, requirements, code quality, and performance.
+Give a single final `score` integer between 0 and 100.
 
 STRICT SCORING RULES:
-- If the submission is empty, blank, copy-pasted starter files, or completely incorrect, the score MUST be in the 0-20% range. NEVER fabricate high scores.
-- Be extremely rigorous. If code fails to meet requirements, penalize heavily.
+- If the submission is entirely blank or just unmodified starter code, the score MUST be 0.
+- Otherwise, evaluate it fairly on a 0-100 scale.
+- NEVER fabricate high scores for incorrect solutions.
 
 Format response as JSON:
 {{
-  "correctness": {{ "score": 0, "feedback": "assessment explanation" }},
-  "edge_cases": {{ "score": 0, "feedback": "assessment explanation" }},
-  "requirements": {{ "score": 0, "feedback": "assessment explanation" }},
-  "code_quality": {{ "score": 0, "feedback": "assessment explanation" }},
-  "performance": {{ "score": 0, "feedback": "assessment explanation" }},
+  "score": 0,
   "strengths": ["Detail 1"],
   "weaknesses": ["Detail 2"],
   "improvements": ["Detail 3"],
@@ -133,31 +126,31 @@ async def retrieve_question_node(state: SubmissionState) -> dict:
                     return {"error": f"Question {qid} not found in database"}
                 
                 meta = {
-                    "title": fb_row[0],
-                    "description": fb_row[1],
+                    "title": _row_get(fb_row, 0, ""),
+                    "description": _row_get(fb_row, 1, ""),
                     "starter_files": {},
-                    "expected_output": fb_row[2] or "",
-                    "category": fb_row[3],
-                    "workspace_type": fb_row[4],
-                    "evaluation_strategy": fb_row[5],
-                    "supported_language": fb_row[6],
-                    "preview_required": fb_row[7] if fb_row[7] is not None else False,
-                    "execution_mode": fb_row[8],
-                    "options": fb_row[9] if fb_row[9] else None
+                    "expected_output": _row_get(fb_row, 2, "") or "",
+                    "category": _row_get(fb_row, 3),
+                    "workspace_type": _row_get(fb_row, 4),
+                    "evaluation_strategy": _row_get(fb_row, 5),
+                    "supported_language": _row_get(fb_row, 6),
+                    "preview_required": _row_get(fb_row, 7, False) if _row_get(fb_row, 7, False) is not None else False,
+                    "execution_mode": _row_get(fb_row, 8),
+                    "options": _row_get(fb_row, 9) if _row_get(fb_row, 9) else None
                 }
             else:
                 meta = {
-                    "title": row[0],
-                    "description": row[1],
-                    "starter_files": row[2] or {},
-                    "expected_output": row[3] or "",
-                    "category": row[4],
-                    "workspace_type": row[5],
-                    "evaluation_strategy": row[6],
-                    "supported_language": row[7],
-                    "preview_required": row[8] if row[8] is not None else False,
-                    "execution_mode": row[9],
-                    "options": row[10] if row[10] else None
+                    "title": _row_get(row, 0, ""),
+                    "description": _row_get(row, 1, ""),
+                    "starter_files": _row_get(row, 2, {}) or {},
+                    "expected_output": _row_get(row, 3, "") or "",
+                    "category": _row_get(row, 4),
+                    "workspace_type": _row_get(row, 5),
+                    "evaluation_strategy": _row_get(row, 6),
+                    "supported_language": _row_get(row, 7),
+                    "preview_required": _row_get(row, 8, False) if _row_get(row, 8, False) is not None else False,
+                    "execution_mode": _row_get(row, 9),
+                    "options": _row_get(row, 10) if _row_get(row, 10) else None
                 }
             
             return {"question_meta": meta}
@@ -297,7 +290,38 @@ async def gemini_evaluate_node(state: SubmissionState) -> dict:
         return {"code_evaluation": parsed}
     except Exception as e:
         logger.error(f"Code evaluation failed: {e}")
-        return {"error": f"LLM code evaluation failure: {str(e)}"}
+        return {
+            "code_evaluation": {
+                "score": 0,
+                "strengths": [],
+                "weaknesses": [f"Code evaluation unavailable: {str(e)}"],
+                "improvements": ["Retry the evaluation after the model service recovers."],
+                "feedback": "Code evaluation could not be completed because the model service failed."
+            }
+        }
+
+
+def _extract_metric_score(code_eval: dict, metric_name: str, fallback_score: float = 0.0) -> float:
+    metric_value = code_eval.get(metric_name)
+    if isinstance(metric_value, dict):
+        try:
+            return float(metric_value.get("score", metric_value.get("value", fallback_score)))
+        except Exception:
+            return fallback_score
+    if isinstance(metric_value, (int, float)):
+        return float(metric_value)
+    return fallback_score
+
+
+def _row_get(row, index: int, default=None):
+    try:
+        if row is None:
+            return default
+        if hasattr(row, "__len__") and len(row) <= index:
+            return default
+        return row[index]
+    except Exception:
+        return default
 
 async def aggregate_scores_node(state: SubmissionState) -> dict:
     logger.info("Executing aggregate_scores node...")
@@ -305,20 +329,30 @@ async def aggregate_scores_node(state: SubmissionState) -> dict:
     visual_eval = state.get("visual_evaluation")
 
     if not code_eval:
-        return {"error": "Score aggregation failed due to missing code evaluation data"}
+        code_eval = {
+            "score": 0,
+            "strengths": [],
+            "weaknesses": ["Code evaluation data was unavailable."],
+            "improvements": ["Retry the evaluation after the grader service recovers."],
+            "feedback": "Code evaluation could not be completed."
+        }
 
-    # Extract score keys
+    # Extract score
     try:
-        corr_score = float(code_eval.get("correctness", {}).get("score", 0))
-        edge_score = float(code_eval.get("edge_cases", {}).get("score", 0))
-        req_score = float(code_eval.get("requirements", {}).get("score", 0))
-        qual_score = float(code_eval.get("code_quality", {}).get("score", 0))
-        perf_score = float(code_eval.get("performance", {}).get("score", 0))
-        
-        raw_code_score = corr_score + edge_score + req_score + qual_score + perf_score
+        raw_code_score = float(code_eval.get("score", 0))
     except Exception as e:
-        logger.error(f"Error reading subscores: {e}")
-        raw_code_score = 70
+        logger.error(f"Error reading raw code score: {e}")
+        raw_code_score = 0
+
+    correctness_score = _extract_metric_score(code_eval, "correctness")
+    edge_score = _extract_metric_score(code_eval, "edge_cases")
+    req_score = _extract_metric_score(code_eval, "requirements")
+    qual_score = _extract_metric_score(code_eval, "code_quality")
+    perf_score = _extract_metric_score(code_eval, "performance")
+
+    derived_component_total = correctness_score + edge_score + req_score + qual_score + perf_score
+    if raw_code_score <= 0 and derived_component_total > 0:
+        raw_code_score = derived_component_total
 
     if visual_eval:
         visual_score = float(visual_eval.get("visual_score", 100))
@@ -353,7 +387,7 @@ async def aggregate_scores_node(state: SubmissionState) -> dict:
     feedback = code_eval.get("feedback", "Excellent effort. Recheck weaknesses and improvements checklist.")
 
     rubric_scores = {
-        "correctness": corr_score,
+        "correctness": correctness_score,
         "edge_cases": edge_score,
         "requirements": req_score,
         "code_quality": qual_score,

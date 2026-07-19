@@ -4,6 +4,7 @@ from app.utils.logger import logger
 import os
 import shutil
 import uuid
+import sys
 
 class BrowserRenderer:
     def __init__(self):
@@ -15,6 +16,10 @@ class BrowserRenderer:
         """
         Write the code files temporarily to local folders and take a full-page screenshot
         """
+        if sys.platform == "win32" and sys.version_info >= (3, 13):
+            logger.warning("Playwright preview rendering is disabled on Windows Python 3.13 due to subprocess compatibility issues.")
+            return None
+
         session_id = str(uuid.uuid4())
         temp_session_dir = os.path.join(self.temp_dir_base, session_id)
         os.makedirs(temp_session_dir, exist_ok=True)
