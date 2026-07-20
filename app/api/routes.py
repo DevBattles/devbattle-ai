@@ -84,7 +84,7 @@ async def evaluate_submission(payload: EvaluateSubmissionRequest):
         logger.error(f"Evaluate submission endpoint error: {e}")
         raise HTTPException(status_code=500, detail=str(e))
 
-@router.post("/internal/mentor/chat")
+@router.post("/mentor/chat")
 async def mentor_chat(payload: MentorChatRequest):
     try:
         logger.info("Received AI Mentor chat request")
