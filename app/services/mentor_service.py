@@ -262,4 +262,12 @@ class MentorService:
             return response_text
         except Exception as e:
             logger.error(f"E2E Chat generation failed across all models in fallback chain: {e}")
+            
+            # Check high fidelity fallbacks
+            msg_lower = user_message.lower()
+            for key, fallback_text in HIGH_FIDELITY_FALLBACKS.items():
+                if key in msg_lower:
+                    logger.info(f"Returning high fidelity fallback for key: {key}")
+                    return fallback_text
+            
             return "I encountered a temporary rate limit or connection issue. Please try your request again in a moment, or ask another programming question."
