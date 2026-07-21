@@ -1,0 +1,36 @@
+name: Deploy AI Backend
+
+on:
+  push:
+    branches:
+      - main
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Deploy to EC2
+        uses: appleboy/ssh-action@v1.2.0
+        with:
+          host: ${{ secrets.EC2_HOST }}
+          username: ${{ secrets.EC2_USER }}
+          key: ${{ secrets.EC2_SSH_KEY }}
+          port: ${{ secrets.EC2_PORT }}
+          script: |
+            set -e
+
+            cd /home/ubuntu/devbattle-ai
+
+            git fetch origin
+            git reset --hard origin/main
+
+            source .venv/bin/activate
+
+            pip install -r requirements.txt
+
+            pm2 restart devbattle-ai
+
+            pm2 save
+
+            echo "✅ AI Backend deployed successfully!"
