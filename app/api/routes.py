@@ -95,3 +95,8 @@ async def mentor_chat(payload: MentorChatRequest):
     except Exception as e:
         logger.error(f"Mentor chat endpoint error: {e}")
         raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.post("/api/ai/mentor/chat")
+async def mentor_chat_public(payload: MentorChatRequest):
+    return await mentor_chat(payload)
