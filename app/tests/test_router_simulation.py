@@ -8,6 +8,12 @@ project_root = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(_
 sys.path.append(project_root)
 load_dotenv(dotenv_path=os.path.join(project_root, ".env"))
 
+# This test drives the model router's fault-injection hooks (e.g. "simulate 429"), which are
+# disabled by default for safety. This script talks to an already-running server process over
+# HTTP, so the *server* (not this script) must be started with ENABLE_ROUTER_FAULT_SIMULATION=true
+# for these fault-injection scenarios to actually trigger.
+os.environ["ENABLE_ROUTER_FAULT_SIMULATION"] = "true"
+
 simulated_tests = [
     {"name": "429 Rate Limit", "message": "simulate 429: What is HTML?", "expected_status": "Cooldown"},
     {"name": "404 Model Not Found", "message": "simulate 404: What is HTML?", "expected_status": "Disabled"},

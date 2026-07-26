@@ -23,6 +23,14 @@ async def lifespan(app: FastAPI):
     yield
     logger.info("Shutting down DevBattles AI backend lifespan...")
 
+from app.config.config import settings
+
+if not settings.internal_api_key:
+    logger.warning(
+        "INTERNAL_API_KEY is not configured. All /internal/* endpoints are UNAUTHENTICATED. "
+        "Set INTERNAL_API_KEY in the environment before exposing this service publicly."
+    )
+
 app = FastAPI(
     title="DevBattles AI Backend",
     description="LangGraph, pgvector, and Playwright Vision grading service engine",
@@ -30,11 +38,15 @@ app = FastAPI(
     lifespan=lifespan
 )
 
-# Configure CORS Middleware
+# Configure CORS Middleware. Credentials cannot be combined with a wildcard origin per the
+# CORS spec, so only enable allow_credentials when explicit origins are configured.
+_cors_origins = settings.cors_origins_list
+_allow_credentials = "*" not in _cors_origins
+
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
-    allow_credentials=True,
+    allow_origins=_cors_origins,
+    allow_credentials=_allow_credentials,
     allow_methods=["*"],
     allow_headers=["*"],
 )

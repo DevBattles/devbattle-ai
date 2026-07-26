@@ -29,6 +29,33 @@ renderer.capture_screenshot = AsyncMock(return_value=b"mock_png_screenshot_bytes
 # Create a mock session to prevent real db query attempts
 mock_session = AsyncMock()
 
+# Mutable holder so individual tests can override the mocked question_versions row returned
+# for "retrieve_question" queries (e.g. to simulate an HTML question with a specific starter
+# file), while keeping a sane default for tests that don't care about these fields.
+_default_question_meta_row = (
+    "Navbar Layout",
+    "Construct a responsive navbar.",
+    {"index.html": {"content": "..."}},
+    "Sliding header menu",
+    None,   # category
+    None,   # workspace_type
+    None,   # evaluation_strategy
+    None,   # supported_language
+    False,  # preview_required
+    None,   # execution_mode
+    None,   # options
+)
+_mock_question_meta_row = {"value": _default_question_meta_row}
+
+
+def set_mock_question_meta_row(row_tuple):
+    _mock_question_meta_row["value"] = row_tuple
+
+
+def reset_mock_question_meta_row():
+    _mock_question_meta_row["value"] = _default_question_meta_row
+
+
 async def mock_execute(query, params=None):
     q_str = str(query).lower()
     mock_res = MagicMock()
@@ -43,13 +70,8 @@ async def mock_execute(query, params=None):
             },
         )
     else:
-        # Default mock question metadata
-        mock_res.fetchone.return_value = (
-            "Navbar Layout",
-            "Construct a responsive navbar.",
-            {"index.html": {"content": "..."}},
-            "Sliding header menu"
-        )
+        # Mock question metadata (overridable per-test via set_mock_question_meta_row)
+        mock_res.fetchone.return_value = _mock_question_meta_row["value"]
     return mock_res
 
 mock_session.execute = AsyncMock(side_effect=mock_execute)
@@ -160,10 +182,67 @@ def test_mentor_chat():
     assert response.status_code == 200
     assert "response" in response.json()["data"]
 
+
+def test_broken_html_structure_caps_score():
+    """
+    Regression test for: a teacher's HTML boilerplate includes an opening <body> tag, the
+    student deletes it, and the AI grader still hallucinates partial credit (previously
+    observed handing out e.g. 15%) despite the page being fundamentally broken. The
+    deterministic structural_validation node (app/graph/structural_checks.py) must now hard-cap
+    the final score regardless of what the LLM says.
+    """
+    starter_html = "<!DOCTYPE html><html><head><title>Navbar</title></head><body><nav>Home</nav></body></html>"
+    # Student deleted the opening <body> tag (closing </body> also removed here, but even just
+    # dropping the opening tag alone is enough to trigger the guardrail).
+    broken_student_html = "<!DOCTYPE html><html><head><title>Navbar</title></head><nav>Home</nav></html>"
+
+    set_mock_question_meta_row((
+        "Navbar Layout",
+        "Construct a responsive navbar.",
+        {"index.html": {"content": starter_html}},
+        "Sliding header menu",
+        "HTML",             # category
+        "html",             # workspace_type
+        "ui_playwright",    # evaluation_strategy
+        "html",             # supported_language
+        False,              # preview_required (keep False so Playwright/vision isn't needed in this unit test)
+        "browser",          # execution_mode
+        None,               # options
+    ))
+
+    try:
+        # Simulate the AI grader hallucinating a generous score despite the broken structure.
+        provider.generate_text.return_value = '''{
+          "score": 65,
+          "strengths": ["Nice use of semantic nav element"],
+          "weaknesses": ["Minor spacing issue"],
+          "improvements": ["Add ARIA roles"],
+          "feedback": "Solid layout overall."
+        }'''
+
+        payload = {
+            "questionId": "00000000-0000-0000-0000-000000000001",
+            "version": 1,
+            "studentFiles": {"index.html": {"content": broken_student_html}},
+            "githubUrl": None
+        }
+
+        response = client.post("/internal/submissions/evaluate", json=payload)
+        print("\n[Test Broken HTML Structure] Response:", response.json())
+        assert response.status_code == 200
+        data = response.json()["data"]
+        assert data["score"] <= 15, f"Expected score capped at <=15 for missing <body> tag, got {data['score']}"
+        assert any("<body>" in w for w in data["feedback"]["weaknesses"]), \
+            "Expected the missing <body> tag issue to be surfaced in weaknesses feedback"
+    finally:
+        reset_mock_question_meta_row()
+
+
 if __name__ == "__main__":
     print("Starting AI Backend tests run...")
     test_health()
     test_question_generate()
     test_submission_evaluate()
     test_mentor_chat()
+    test_broken_html_structure_caps_score()
     print("\nAll AI Backend tests completed successfully!")

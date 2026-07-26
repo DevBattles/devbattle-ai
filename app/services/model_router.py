@@ -26,16 +26,26 @@ def get_fallback_chain() -> List[str]:
 def init_health_registry():
     chain = get_fallback_chain()
     for m in chain:
-        if m not in MODEL_HEALTH_REGISTRY:
-            MODEL_HEALTH_REGISTRY[m] = {
-                "status": "Available",  # Available, Rate Limited, Cooldown, Disabled
-                "cooldown_until": 0.0,
-                "consecutive_failures": 0,
-                "total_failures": 0,
-                "total_successes": 0,
-                "last_successful_request": None,
-                "latency_history": []  # List of floats (latencies)
-            }
+        _register_model(m)
+
+def _register_model(model_name: str) -> dict:
+    """
+    Ensure a health entry exists for the given model name and return it.
+    Called for every model we might route to -- including ones requested at
+    runtime that aren't part of the configured fallback chain -- so that the
+    router never dereferences a missing registry entry.
+    """
+    if model_name not in MODEL_HEALTH_REGISTRY:
+        MODEL_HEALTH_REGISTRY[model_name] = {
+            "status": "Available",  # Available, Rate Limited, Cooldown, Disabled
+            "cooldown_until": 0.0,
+            "consecutive_failures": 0,
+            "total_failures": 0,
+            "total_successes": 0,
+            "last_successful_request": None,
+            "latency_history": []  # List of floats (latencies)
+        }
+    return MODEL_HEALTH_REGISTRY[model_name]
 
 def get_avg_latency(model_name: str) -> float:
     history = MODEL_HEALTH_REGISTRY.get(model_name, {}).get("latency_history", [])
@@ -65,11 +75,11 @@ def select_best_model(requested_model: Optional[str] = None) -> List[str]:
     unhealthy_models = []
     
     for m in ordered_chain:
-        health = MODEL_HEALTH_REGISTRY.get(m)
-        if not health:
-            healthy_models.append(m)
-            continue
-            
+        # Register the model if it isn't already tracked (e.g. a caller-requested model that
+        # falls outside the configured GEMINI_MODELS_FALLBACK_CHAIN) so downstream health
+        # lookups never hit a missing entry.
+        health = _register_model(m)
+
         # Check if cooldown has expired
         if health["status"] in ["Cooldown", "Rate Limited", "Unavailable", "Disabled"] and now >= health["cooldown_until"]:
             health["status"] = "Available"
@@ -147,20 +157,25 @@ async def generate_content_with_router(
     start_request_time = time.time()
     
     simulated_error = None
-    prompt_lower = prompt.lower()
-    if "simulate 429" in prompt_lower:
-        simulated_error = "429"
-    elif "simulate 404" in prompt_lower:
-        simulated_error = "404"
-    elif "simulate 503" in prompt_lower:
-        simulated_error = "503"
-    elif "simulate timeout" in prompt_lower:
-        simulated_error = "timeout"
-    elif "simulate network" in prompt_lower:
-        simulated_error = "network"
+    # Fault-injection hook used exclusively by app/tests/test_router_simulation.py. This must
+    # stay OFF (default) in any environment that accepts real user input -- otherwise any
+    # end user could type e.g. "simulate 404" in a chat message and force the router to skip
+    # calling the model and mark the primary model unhealthy/disabled for everyone.
+    if settings.enable_router_fault_simulation:
+        prompt_lower = prompt.lower()
+        if "simulate 429" in prompt_lower:
+            simulated_error = "429"
+        elif "simulate 404" in prompt_lower:
+            simulated_error = "404"
+        elif "simulate 503" in prompt_lower:
+            simulated_error = "503"
+        elif "simulate timeout" in prompt_lower:
+            simulated_error = "timeout"
+        elif "simulate network" in prompt_lower:
+            simulated_error = "network"
 
     for current_model in models_to_try:
-        health = MODEL_HEALTH_REGISTRY.get(current_model)
+        health = _register_model(current_model)
         
         if current_model != primary_model:
             if current_model not in fallback_models_attempted:

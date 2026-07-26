@@ -5,6 +5,7 @@ from app.graph.nodes import (
     retrieve_question_node,
     retrieve_rubric_node,
     retrieve_similar_solutions_node,
+    structural_validation_node,
     vision_check_node,
     gemini_evaluate_node,
     aggregate_scores_node,
@@ -19,6 +20,7 @@ def build_workflow():
     workflow.add_node("retrieve_question", retrieve_question_node)
     workflow.add_node("retrieve_rubric", retrieve_rubric_node)
     workflow.add_node("retrieve_similar_solutions", retrieve_similar_solutions_node)
+    workflow.add_node("structural_validation", structural_validation_node)
     workflow.add_node("vision_check", vision_check_node)
     workflow.add_node("gemini_evaluate", gemini_evaluate_node)
     workflow.add_node("aggregate_scores", aggregate_scores_node)
@@ -44,7 +46,11 @@ def build_workflow():
 
     workflow.add_edge("retrieve_question", "retrieve_rubric")
     workflow.add_edge("retrieve_rubric", "retrieve_similar_solutions")
-    workflow.add_edge("retrieve_similar_solutions", "vision_check")
+    # Deterministic structural HTML validation runs alongside/independent of the LLM path so it
+    # can enforce a hard score ceiling later in aggregate_scores regardless of what the AI
+    # grader concludes (see app/graph/structural_checks.py).
+    workflow.add_edge("retrieve_similar_solutions", "structural_validation")
+    workflow.add_edge("structural_validation", "vision_check")
     workflow.add_edge("vision_check", "gemini_evaluate")
     workflow.add_edge("gemini_evaluate", "aggregate_scores")
     workflow.add_edge("aggregate_scores", "generate_report")

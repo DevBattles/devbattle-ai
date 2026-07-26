@@ -2,6 +2,7 @@ from app.graph.state import SubmissionState
 from app.providers.gemini import GeminiProvider
 from app.embeddings.vector_client import VectorClient
 from app.vision.browser_renderer import BrowserRenderer
+from app.graph.structural_checks import analyze_html_structure
 from app.utils.logger import logger
 from sqlalchemy import text
 import uuid
@@ -26,6 +27,44 @@ Format response as JSON:
 }}
 Return only valid JSON.
 """
+
+
+def _parse_llm_json(raw_report: str) -> dict:
+    """
+    Robustly parse a JSON object out of an LLM text response. Handles the common cases where
+    the model wraps its answer in a markdown code fence (` ```json ... ``` `, ` ``` ... ``` `,
+    with/without trailing whitespace or a leading language tag with different casing), or adds
+    stray prose before/after the JSON object. Raises json.JSONDecodeError if no valid JSON
+    object can be recovered.
+    """
+    clean_str = (raw_report or "").strip()
+
+    # Strip a leading ``` or ```json / ```JSON fence (any casing) and an optional trailing ```.
+    if clean_str.startswith("```"):
+        first_newline = clean_str.find("\n")
+        if first_newline != -1:
+            clean_str = clean_str[first_newline + 1:]
+        else:
+            clean_str = clean_str[3:]
+    if clean_str.endswith("```"):
+        clean_str = clean_str[:-3]
+
+    clean_str = clean_str.strip()
+
+    try:
+        return json.loads(clean_str)
+    except json.JSONDecodeError as jde:
+        # Try to extract content inside the outermost { } braces in case of stray prose.
+        start_idx = clean_str.find('{')
+        end_idx = clean_str.rfind('}')
+        if start_idx != -1 and end_idx != -1 and end_idx > start_idx:
+            try:
+                return json.loads(clean_str[start_idx:end_idx + 1])
+            except Exception:
+                logger.error(f"Fallback brace parsing failed: {jde}. Raw report was: {raw_report}")
+                raise jde
+        logger.error(f"JSON brace boundaries not found: {jde}. Raw report was: {raw_report}")
+        raise jde
 
 CODE_EVALUATE_PROMPT = """
 You are a Principal AI backend grading assistant.
@@ -80,7 +119,9 @@ async def validate_input_node(state: SubmissionState) -> dict:
     ver = state.get("version")
     files = state.get("student_files")
 
-    if not qid or not ver or not files:
+    # NOTE: use explicit None/falsy-container checks rather than `not ver`, since version 0 is a
+    # legitimate (if unusual) integer version and Python truthiness treats 0 the same as missing.
+    if not qid or ver is None or not files:
         return {"error": "Validation failed: question_id, version, and student_files must be supplied"}
     
     try:
@@ -186,6 +227,19 @@ async def retrieve_rubric_node(state: SubmissionState) -> dict:
         logger.warning(f"Failed to load rubric, using fallback: {e}")
         return {"rubric": {}}
 
+def _extract_file_content(file_data) -> str:
+    """
+    Student file entries are expected to look like {"content": "..."}, but studentFiles is a
+    loosely-typed Dict[str, Any] at the API boundary, so tolerate a bare string value instead
+    of crashing with AttributeError.
+    """
+    if isinstance(file_data, dict):
+        return file_data.get("content", "") or ""
+    if isinstance(file_data, str):
+        return file_data
+    return "" if file_data is None else str(file_data)
+
+
 async def retrieve_similar_solutions_node(state: SubmissionState) -> dict:
     logger.info("Executing retrieve_similar_solutions node...")
     qid = state["question_id"]
@@ -194,7 +248,7 @@ async def retrieve_similar_solutions_node(state: SubmissionState) -> dict:
     # Concat all student code to make embedding search index robust
     student_code = ""
     for name, f_data in files.items():
-        student_code += f"\n// File: {name}\n" + f_data.get("content", "")
+        student_code += f"\n// File: {name}\n" + _extract_file_content(f_data)
 
     try:
         embedding = await provider.get_embedding(student_code)
@@ -203,6 +257,33 @@ async def retrieve_similar_solutions_node(state: SubmissionState) -> dict:
     except Exception as e:
         logger.warning(f"pgvector retrieval failed: {e}. Continuing evaluation without similar solutions.")
         return {"similar_solutions": []}
+
+async def structural_validation_node(state: SubmissionState) -> dict:
+    """
+    Deterministic guardrail that runs before the LLM-based evaluators. Detects fundamentally
+    broken HTML structure (e.g. a missing/removed <body> tag) that should hard-cap the final
+    score regardless of what the AI grader says, since generative grading alone can still be
+    persuaded to award partial credit for a page that cannot render at all.
+    """
+    logger.info("Executing structural_validation node...")
+    files = state["student_files"]
+    meta = state.get("question_meta", {}) or {}
+
+    try:
+        analysis = analyze_html_structure(meta, files)
+    except Exception as e:
+        # Never let a bug in this deterministic check block the rest of the pipeline.
+        logger.error(f"Structural validation check failed unexpectedly: {e}")
+        return {"structural_issues": [], "structural_score_cap": None}
+
+    if analysis["issues"]:
+        logger.warning(f"Structural validation found issues: {analysis['issues']} (score cap: {analysis['score_cap']})")
+
+    return {
+        "structural_issues": analysis["issues"],
+        "structural_score_cap": analysis["score_cap"]
+    }
+
 
 async def vision_check_node(state: SubmissionState) -> dict:
     logger.info("Executing vision_check node...")
@@ -221,15 +302,8 @@ async def vision_check_node(state: SubmissionState) -> dict:
 
         prompt = VISION_CHECK_PROMPT.format(expected_output=expected_output)
         raw_report = await provider.generate_multimodal(prompt, screenshot_bytes)
-        
-        # Parse JSON
-        clean_str = raw_report.strip()
-        if clean_str.startswith("```json"):
-            clean_str = clean_str[7:]
-        if clean_str.endswith("```"):
-            clean_str = clean_str[:-3]
-        
-        parsed = json.loads(clean_str.strip())
+
+        parsed = _parse_llm_json(raw_report)
         return {
             "screenshot_bytes": screenshot_bytes,
             "visual_evaluation": parsed
@@ -264,28 +338,7 @@ async def gemini_evaluate_node(state: SubmissionState) -> dict:
             json_mode=True
         )
 
-        clean_str = raw_report.strip()
-        if clean_str.startswith("```json"):
-            clean_str = clean_str[7:]
-        if clean_str.endswith("```"):
-            clean_str = clean_str[:-3]
-
-        clean_str = clean_str.strip()
-        try:
-            parsed = json.loads(clean_str)
-        except json.JSONDecodeError as jde:
-            # Try to extract content inside the outermost { } braces
-            start_idx = clean_str.find('{')
-            end_idx = clean_str.rfind('}')
-            if start_idx != -1 and end_idx != -1:
-                try:
-                    parsed = json.loads(clean_str[start_idx:end_idx+1])
-                except Exception:
-                    logger.error(f"Fallback brace parsing failed: {jde}. Raw report was: {raw_report}")
-                    raise jde
-            else:
-                logger.error(f"JSON brace boundaries not found: {jde}. Raw report was: {raw_report}")
-                raise jde
+        parsed = _parse_llm_json(raw_report)
 
         return {"code_evaluation": parsed}
     except Exception as e:
@@ -323,6 +376,31 @@ def _row_get(row, index: int, default=None):
     except Exception:
         return default
 
+def _safe_list(value) -> list:
+    """
+    Coerce a value that should be a list of strings into an actual list, tolerating None
+    (which `dict.get(key, default)` does NOT catch when the key is present but explicitly
+    null -- a real possibility since this data originates from LLM-generated JSON) as well
+    as a single bare string.
+    """
+    if value is None:
+        return []
+    if isinstance(value, list):
+        return value
+    if isinstance(value, str):
+        return [value]
+    return []
+
+
+def _safe_float(value, default: float = 0.0) -> float:
+    if value is None:
+        return default
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return default
+
+
 async def aggregate_scores_node(state: SubmissionState) -> dict:
     logger.info("Executing aggregate_scores node...")
     code_eval = state.get("code_evaluation")
@@ -338,11 +416,7 @@ async def aggregate_scores_node(state: SubmissionState) -> dict:
         }
 
     # Extract score
-    try:
-        raw_code_score = float(code_eval.get("score", 0))
-    except Exception as e:
-        logger.error(f"Error reading raw code score: {e}")
-        raw_code_score = 0
+    raw_code_score = _safe_float(code_eval.get("score"), default=0.0)
 
     correctness_score = _extract_metric_score(code_eval, "correctness")
     edge_score = _extract_metric_score(code_eval, "edge_cases")
@@ -355,13 +429,26 @@ async def aggregate_scores_node(state: SubmissionState) -> dict:
         raw_code_score = derived_component_total
 
     if visual_eval:
-        visual_score = float(visual_eval.get("visual_score", 100))
+        visual_score = _safe_float(visual_eval.get("visual_score"), default=100.0)
         aggregated = (raw_code_score * 0.8) + (visual_score * 0.2)
     else:
         visual_score = 0.0
         aggregated = raw_code_score
 
     final_score = int(round(aggregated))
+
+    # Hard guardrail: deterministic structural HTML validation (see
+    # app/graph/structural_checks.py) can enforce a ceiling on the final score regardless of
+    # what the LLM grader concluded -- e.g. a submission with a deleted <body> tag should never
+    # score above 15%, even if the AI evaluator was persuaded otherwise.
+    structural_issues = state.get("structural_issues") or []
+    structural_score_cap = state.get("structural_score_cap")
+    if structural_score_cap is not None and final_score > structural_score_cap:
+        logger.warning(
+            f"Capping final score from {final_score} to {structural_score_cap} due to structural "
+            f"HTML validation failures: {structural_issues}"
+        )
+        final_score = structural_score_cap
 
     # Apply grading standard
     if final_score >= 90:
@@ -375,16 +462,29 @@ async def aggregate_scores_node(state: SubmissionState) -> dict:
     else:
         grade = "F"
 
-    # Merge feedback parameters
-    strengths = code_eval.get("strengths", [])
-    weaknesses = code_eval.get("weaknesses", [])
-    improvements = code_eval.get("improvements", [])
+    # Merge feedback parameters. `code_eval.get(key, default)` only falls back when the key is
+    # absent -- if the LLM emits an explicit JSON `null` (which it is free to do; nothing
+    # enforces the response schema), these would otherwise stay None and crash the slicing /
+    # extend() calls below.
+    strengths = _safe_list(code_eval.get("strengths"))
+    weaknesses = _safe_list(code_eval.get("weaknesses"))
+    improvements = _safe_list(code_eval.get("improvements"))
     
     if visual_eval:
-        strengths.extend(visual_eval.get("strengths", []))
-        weaknesses.extend(visual_eval.get("weaknesses", []))
+        strengths = strengths + _safe_list(visual_eval.get("strengths"))
+        weaknesses = weaknesses + _safe_list(visual_eval.get("weaknesses"))
 
-    feedback = code_eval.get("feedback", "Excellent effort. Recheck weaknesses and improvements checklist.")
+    if structural_issues:
+        # Surface the deterministic findings prominently so the student understands exactly
+        # why their score is capped, independent of whatever the LLM said.
+        weaknesses = structural_issues + weaknesses
+        improvements = [
+            "Restore the required HTML structure (e.g. matching opening/closing tags) before "
+            "resubmitting -- structural issues cap your score regardless of other functionality."
+        ] + improvements
+
+    feedback = code_eval.get("feedback") or "Excellent effort. Recheck weaknesses and improvements checklist."
+
 
     rubric_scores = {
         "correctness": correctness_score,
