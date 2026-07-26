@@ -59,12 +59,15 @@ class VectorClient:
         Retrieve semantically close reference solutions from database using cosine distance
         """
         q_uuid = uuid.UUID(question_id)
-        # Cosine distance operator '<=>' works directly on pgvector column types
+        # Cosine distance operator '<=>' only has an implementation for the `vector` pgvector
+        # type. asyncpg sends string-bound parameters as `text`/`unknown`, and there is no
+        # `vector <=> text` operator, so the bind parameter must be explicitly cast with
+        # `::vector` or Postgres raises "operator does not exist: vector <=> text/character varying".
         stmt = text("""
-            SELECT solution_code, solution_type, 1 - (embedding <=> :emb) as similarity
+            SELECT solution_code, solution_type, 1 - (embedding <=> CAST(:emb AS vector)) as similarity
             FROM ai_solution_embeddings
             WHERE question_id = :qid
-            ORDER BY embedding <=> :emb
+            ORDER BY embedding <=> CAST(:emb AS vector)
             LIMIT :limit
         """)
 

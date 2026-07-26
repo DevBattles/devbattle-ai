@@ -3,6 +3,7 @@ from app.prompts.mentor_prompts import MENTOR_SYSTEM_INSTRUCTION
 from app.utils.logger import logger
 from datetime import datetime, timezone
 import json
+import traceback
 
 HIGH_FIDELITY_FALLBACKS = {
     "semantic tags": """### 1. Introduction: What are Semantic Tags?
@@ -131,9 +132,9 @@ Docker is an open-source platform that automates the deployment of applications 
 - **Container**: Live, isolated runtime instance instantiated from an image.
 - **Registry**: Storage repository for publishing and sharing images (e.g., Docker Hub)."""
 }
-import traceback
-from fastapi import HTTPException
 
+# Process-wide snapshot of the mentor chat's most recent AI provider interaction, surfaced for
+# observability/debugging. Updated by get_mentor_response() on every call.
 HEALTH_STATUS = {
     "current_model": "Unknown",
     "api_status": "Unknown",
@@ -246,12 +247,7 @@ class MentorService:
             "system_instruction_length": len(system_instruction),
             "history_length": len(chat_history)
         }
-
-        # Initialize tracking variables for logs/health
-        http_status_code = 200
-        exception_type = "None"
-        stack_trace = "None"
-        raw_response = ""
+        logger.debug(f"AI Mentor request payload metrics: {request_payload} (api_key_status={api_key_status})")
 
         try:
             response_text = await self.provider.generate_text(
@@ -259,10 +255,35 @@ class MentorService:
                 system_instruction=system_instruction,
                 model=self.provider._chat_model
             )
+
+            # Record success for observability (see HEALTH_STATUS docstring above).
+            HEALTH_STATUS["current_model"] = selected_model
+            HEALTH_STATUS["api_status"] = "OK"
+            HEALTH_STATUS["quota_status"] = "OK"
+            HEALTH_STATUS["last_successful_request"] = {
+                "timestamp": datetime.now(timezone.utc).isoformat(),
+                "model": selected_model
+            }
+
             return response_text
         except Exception as e:
-            logger.error(f"E2E Chat generation failed across all models in fallback chain: {e}")
-            
+            error_details = parse_api_exception(e)
+            logger.error(
+                f"E2E Chat generation failed across all models in fallback chain "
+                f"[{error_details['reason']}]: {error_details['detail']}"
+            )
+
+            HEALTH_STATUS["current_model"] = selected_model
+            HEALTH_STATUS["api_status"] = error_details["reason"]
+            HEALTH_STATUS["quota_status"] = "Rate Limited" if error_details["status_code"] == 429 else HEALTH_STATUS["quota_status"]
+            HEALTH_STATUS["last_failed_request"] = {
+                "timestamp": datetime.now(timezone.utc).isoformat(),
+                "model": selected_model,
+                "status_code": error_details["status_code"],
+                "reason": error_details["reason"],
+                "exception_type": error_details["exception_type"]
+            }
+
             # Check high fidelity fallbacks
             msg_lower = user_message.lower()
             for key, fallback_text in HIGH_FIDELITY_FALLBACKS.items():

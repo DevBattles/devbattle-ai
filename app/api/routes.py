@@ -1,4 +1,4 @@
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, HTTPException, Header, Depends
 from app.schemas.schemas import (
     GenerateQuestionRequest,
     EvaluateSubmissionRequest,
@@ -10,11 +10,26 @@ from app.services.solution_generator import SolutionGeneratorService
 from app.services.mentor_service import MentorService
 from app.graph.workflow import app_workflow
 from app.utils.logger import logger
-from typing import Dict, Any
+from app.config.config import settings
+from typing import Dict, Any, Optional
 
 router = APIRouter()
 
-@router.post("/internal/router/reset")
+
+def verify_internal_api_key(x_internal_api_key: Optional[str] = Header(default=None)):
+    """
+    Guards all /internal/* routes with a shared-secret header. If INTERNAL_API_KEY is not
+    configured in the environment, auth is skipped (with a startup warning already logged)
+    to preserve local-dev/backwards compatibility -- but any internet-facing deployment
+    MUST set INTERNAL_API_KEY.
+    """
+    if not settings.internal_api_key:
+        return
+    if not x_internal_api_key or x_internal_api_key != settings.internal_api_key:
+        raise HTTPException(status_code=401, detail="Missing or invalid X-Internal-Api-Key header")
+
+
+@router.post("/internal/router/reset", dependencies=[Depends(verify_internal_api_key)])
 def reset_router_health():
     from app.services.model_router import reset_health_registry
     reset_health_registry()
@@ -29,13 +44,15 @@ mentor_service = MentorService(provider)
 @router.get("/health")
 def health_check():
     from app.services.model_router import get_health_status_report
+    from app.services.mentor_service import HEALTH_STATUS as mentor_health_status
     return {
         "status": "ok",
         "service": "devbattle-ai-backend",
-        "health_details": get_health_status_report()
+        "health_details": get_health_status_report(),
+        "mentor_chat_health": mentor_health_status
     }
 
-@router.post("/internal/questions/generate")
+@router.post("/internal/questions/generate", dependencies=[Depends(verify_internal_api_key)])
 async def generate_solutions(payload: GenerateQuestionRequest):
     try:
         logger.info(f"Received question generation request for {payload.questionId}")
@@ -45,7 +62,7 @@ async def generate_solutions(payload: GenerateQuestionRequest):
         logger.error(f"Generate solutions endpoint error: {e}")
         raise HTTPException(status_code=500, detail=str(e))
 
-@router.post("/internal/submissions/evaluate")
+@router.post("/internal/submissions/evaluate", dependencies=[Depends(verify_internal_api_key)])
 async def evaluate_submission(payload: EvaluateSubmissionRequest):
     try:
         logger.info(f"Received submission evaluation request for {payload.questionId} v{payload.version}")
@@ -84,7 +101,7 @@ async def evaluate_submission(payload: EvaluateSubmissionRequest):
         logger.error(f"Evaluate submission endpoint error: {e}")
         raise HTTPException(status_code=500, detail=str(e))
 
-@router.post("/internal/mentor/chat")
+@router.post("/internal/mentor/chat", dependencies=[Depends(verify_internal_api_key)])
 async def mentor_chat(payload: MentorChatRequest):
     try:
         logger.info("Received AI Mentor chat request")

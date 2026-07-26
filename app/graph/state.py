@@ -16,7 +16,14 @@ class SubmissionState(TypedDict):
     # Internal node evaluation outputs
     code_evaluation: Optional[Dict[str, Any]]
     visual_evaluation: Optional[Dict[str, Any]]
-    
+
+    # Deterministic (non-LLM) structural HTML validation, e.g. detecting a student who deleted
+    # a critical boilerplate tag such as <body> that was present in the teacher's starter files.
+    # This exists as a hard guardrail because LLM grading alone has been observed to still hand
+    # out partial credit (e.g. ~15%) for a submission with fundamentally broken HTML structure.
+    structural_issues: Optional[List[str]]
+    structural_score_cap: Optional[int]
+
     # Final aggregated reports
     score: Optional[int]
     grade: Optional[str]

@@ -5,12 +5,50 @@ import os
 import shutil
 import uuid
 import sys
+from typing import Optional
 
 class BrowserRenderer:
     def __init__(self):
         self.headless = settings.playwright_headless
         self.temp_dir_base = os.path.join(os.getcwd(), "scratch", "previews")
         os.makedirs(self.temp_dir_base, exist_ok=True)
+
+    @staticmethod
+    def _extract_content(file_data) -> str:
+        """
+        Student file entries are expected to look like {"content": "..."}, but the API accepts
+        loosely-typed JSON, so tolerate a bare string value too instead of crashing.
+        """
+        if isinstance(file_data, dict):
+            return file_data.get("content", "") or ""
+        if isinstance(file_data, str):
+            return file_data
+        return "" if file_data is None else str(file_data)
+
+    @staticmethod
+    def _safe_target_path(base_dir: str, filename: str) -> Optional[str]:
+        """
+        Resolve `filename` (attacker-controlled, from student submissions) against `base_dir`
+        and make sure the result cannot escape `base_dir` via path traversal (e.g.
+        "../../../etc/passwd"), a rooted/absolute path, or a Windows drive/UNC path.
+        Returns None if the filename is unsafe and should be rejected.
+        """
+        if not filename or not isinstance(filename, str):
+            return None
+
+        # Reject absolute paths and drive letters/UNC paths outright.
+        normalized_input = filename.replace("\\", "/")
+        if normalized_input.startswith("/") or ":" in normalized_input.split("/")[0]:
+            return None
+
+        base_dir_real = os.path.realpath(base_dir)
+        candidate = os.path.realpath(os.path.join(base_dir_real, normalized_input))
+
+        # Ensure the resolved candidate path is still inside base_dir.
+        if candidate != base_dir_real and not candidate.startswith(base_dir_real + os.sep):
+            return None
+
+        return candidate
 
     async def capture_screenshot(self, files: dict, viewport_width: int = 1280, viewport_height: int = 800) -> bytes:
         """
@@ -27,11 +65,15 @@ class BrowserRenderer:
         logger.info(f"Preparing temporary preview files in: {temp_session_dir}")
 
         index_file_path = None
-        for filename, file_data in files.items():
-            content = file_data.get("content", "")
-            target_path = os.path.join(temp_session_dir, filename)
+        for filename, file_data in (files or {}).items():
+            content = self._extract_content(file_data)
+            target_path = self._safe_target_path(temp_session_dir, filename)
+            if target_path is None:
+                logger.warning(f"Rejected unsafe/out-of-bounds student file path: {filename!r}")
+                continue
+
             os.makedirs(os.path.dirname(target_path), exist_ok=True)
-            
+
             with open(target_path, "w", encoding="utf-8") as f:
                 f.write(content)
             
@@ -41,8 +83,10 @@ class BrowserRenderer:
         if not index_file_path:
             for filename in files.keys():
                 if filename.lower().endswith(".html"):
-                    index_file_path = os.path.join(temp_session_dir, filename)
-                    break
+                    safe_path = self._safe_target_path(temp_session_dir, filename)
+                    if safe_path and os.path.isfile(safe_path):
+                        index_file_path = safe_path
+                        break
 
         if not index_file_path:
             logger.warning("No entry point HTML found. Creating default page placeholder.")
