@@ -238,6 +238,49 @@ def test_broken_html_structure_caps_score():
         reset_mock_question_meta_row()
 
 
+def test_unmodified_starter_code_caps_score():
+    """An unchanged starter submission must receive zero even when the LLM is generous."""
+    starter_html = "<!DOCTYPE html><html><head><title>Navbar</title></head><body><nav>Home</nav></body></html>"
+
+    set_mock_question_meta_row((
+        "Navbar Layout",
+        "Construct a responsive navbar.",
+        {"index.html": {"content": starter_html}},
+        "Sliding header menu",
+        "HTML",
+        "html",
+        "ui_playwright",
+        "html",
+        False,
+        "browser",
+        None,
+    ))
+
+    try:
+        provider.generate_text.return_value = '''{
+          "score": 90,
+          "strengths": ["Good markup"],
+          "weaknesses": [],
+          "improvements": [],
+          "feedback": "Looks complete."
+        }'''
+
+        response = client.post("/internal/submissions/evaluate", json={
+            "questionId": "00000000-0000-0000-0000-000000000001",
+            "version": 1,
+            "studentFiles": {"index.html": {"content": starter_html}},
+            "githubUrl": None,
+        })
+        print("\n[Test Unmodified Starter Code] Response:", response.json())
+        assert response.status_code == 200
+        data = response.json()["data"]
+        assert data["score"] == 0, f"Expected unchanged starter code to score 0, got {data['score']}"
+        assert any("unchanged" in weakness.lower() for weakness in data["feedback"]["weaknesses"]), \
+            "Expected the unchanged starter-code issue in weaknesses feedback"
+    finally:
+        reset_mock_question_meta_row()
+
+
 if __name__ == "__main__":
     print("Starting AI Backend tests run...")
     test_health()
@@ -245,4 +288,5 @@ if __name__ == "__main__":
     test_submission_evaluate()
     test_mentor_chat()
     test_broken_html_structure_caps_score()
+    test_unmodified_starter_code_caps_score()
     print("\nAll AI Backend tests completed successfully!")
