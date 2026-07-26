@@ -3,6 +3,7 @@ from app.providers.gemini import GeminiProvider
 from app.embeddings.vector_client import VectorClient
 from app.vision.browser_renderer import BrowserRenderer
 from app.graph.structural_checks import analyze_html_structure
+from app.graph.originality_checks import detect_unmodified_submission
 from app.utils.logger import logger
 from sqlalchemy import text
 import uuid
@@ -260,30 +261,51 @@ async def retrieve_similar_solutions_node(state: SubmissionState) -> dict:
 
 async def structural_validation_node(state: SubmissionState) -> dict:
     """
-    Deterministic guardrail that runs before the LLM-based evaluators. Detects fundamentally
-    broken HTML structure (e.g. a missing/removed <body> tag) that should hard-cap the final
-    score regardless of what the AI grader says, since generative grading alone can still be
-    persuaded to award partial credit for a page that cannot render at all.
+    Deterministic guardrail that runs before the LLM-based evaluators. Combines two checks
+    that the LLM grader has been observed to not reliably self-enforce, even though its own
+    prompt instructs it to:
+      1. Structural HTML validation (app/graph/structural_checks.py) -- e.g. a missing/removed
+         <body> tag that makes the page fundamentally broken.
+      2. Unmodified/blank submission detection (app/graph/originality_checks.py) -- the student
+         submitted the teacher's starter code as-is (or left it blank), which per the grading
+         prompt's own "STRICT SCORING RULES" must score 0, but the LLM can still hallucinate
+         partial credit for it.
+    Both checks produce a hard ceiling on the final score that the LLM's opinion cannot
+    override (enforced later in aggregate_scores_node).
     """
     logger.info("Executing structural_validation node...")
     files = state["student_files"]
     meta = state.get("question_meta", {}) or {}
 
+    issues: list = []
+    caps: list = []
+
     try:
-        analysis = analyze_html_structure(meta, files)
+        structural_analysis = analyze_html_structure(meta, files)
+        issues.extend(structural_analysis["issues"])
+        if structural_analysis["score_cap"] is not None:
+            caps.append(structural_analysis["score_cap"])
     except Exception as e:
         # Never let a bug in this deterministic check block the rest of the pipeline.
-        logger.error(f"Structural validation check failed unexpectedly: {e}")
-        return {"structural_issues": [], "structural_score_cap": None}
+        logger.error(f"Structural HTML validation check failed unexpectedly: {e}")
 
-    if analysis["issues"]:
-        logger.warning(f"Structural validation found issues: {analysis['issues']} (score cap: {analysis['score_cap']})")
+    try:
+        originality_analysis = detect_unmodified_submission(meta, files)
+        issues.extend(originality_analysis["issues"])
+        if originality_analysis["score_cap"] is not None:
+            caps.append(originality_analysis["score_cap"])
+    except Exception as e:
+        logger.error(f"Unmodified-submission check failed unexpectedly: {e}")
+
+    score_cap = min(caps) if caps else None
+
+    if issues:
+        logger.warning(f"Structural validation found issues: {issues} (score cap: {score_cap})")
 
     return {
-        "structural_issues": analysis["issues"],
-        "structural_score_cap": analysis["score_cap"]
+        "structural_issues": issues,
+        "structural_score_cap": score_cap
     }
-
 
 async def vision_check_node(state: SubmissionState) -> dict:
     logger.info("Executing vision_check node...")
@@ -479,8 +501,9 @@ async def aggregate_scores_node(state: SubmissionState) -> dict:
         # why their score is capped, independent of whatever the LLM said.
         weaknesses = structural_issues + weaknesses
         improvements = [
-            "Restore the required HTML structure (e.g. matching opening/closing tags) before "
-            "resubmitting -- structural issues cap your score regardless of other functionality."
+            "Make sure you actually modify the starter code to solve the challenge, and keep "
+            "the HTML structure intact (matching opening/closing tags) -- these issues are "
+            "checked automatically and cap your score regardless of other feedback."
         ] + improvements
 
     feedback = code_eval.get("feedback") or "Excellent effort. Recheck weaknesses and improvements checklist."
